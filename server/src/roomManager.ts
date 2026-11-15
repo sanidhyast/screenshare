@@ -8,13 +8,11 @@ export class RoomManager {
   // Rate limiting map: ip -> timestamps
   private rateLimits: Map<string, number[]> = new Map();
 
-  // Host reconnect grace period: 45 seconds
-  private readonly HOST_RECONNECT_GRACE_MS = 45000;
-  // Inactive room cleanup: 1 hour
-  private readonly MAX_ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
+  // Host reconnect grace period: 3 minutes (allows host to refresh or reconnect without losing room)
+  private readonly HOST_RECONNECT_GRACE_MS = 3 * 60 * 1000;
 
   constructor() {
-    // Periodic cleanup of abandoned/empty rooms every 60 seconds
+    // Periodic check for abandoned rooms where host closed browser and didn't reconnect
     setInterval(() => this.cleanupExpiredRooms(), 60000);
   }
 
@@ -190,18 +188,8 @@ export class RoomManager {
   private cleanupExpiredRooms(): void {
     const now = Date.now();
     for (const [id, room] of this.rooms.entries()) {
-      // 1. Host disconnected and grace period passed
+      // Only clean up if the host closed the browser/disconnected and never returned within grace period
       if (room.hostDisconnectedAt && now - room.hostDisconnectedAt > this.HOST_RECONNECT_GRACE_MS) {
-        this.endRoom(id);
-        continue;
-      }
-      // 2. Room exceeded max lifetime
-      if (now - room.createdAt > this.MAX_ROOM_LIFETIME_MS) {
-        this.endRoom(id);
-        continue;
-      }
-      // 3. Room inactive with no viewers and no sharing for over 30 mins
-      if (room.viewers.size === 0 && !room.isSharing && now - room.lastActivity > 30 * 60 * 1000) {
         this.endRoom(id);
       }
     }
