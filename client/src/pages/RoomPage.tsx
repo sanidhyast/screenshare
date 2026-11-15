@@ -64,20 +64,30 @@ export const RoomPage: React.FC<RoomPageProps> = ({
     }
   }, [isHost, localStream, remoteStream]);
 
-  // Handle Fullscreen
+  // Handle Fullscreen with iOS Safari webkit fallback
   const handleToggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      containerRef.current?.requestFullscreen().then(() => {
-        setIsFullscreen(true);
-      }).catch((err) => {
-        console.warn('Fullscreen request failed:', err);
-      });
+    const video = videoRef.current;
+    const container = containerRef.current;
+
+    if (!document.fullscreenElement && !(video as any)?.webkitDisplayingFullscreen) {
+      if (container?.requestFullscreen) {
+        container.requestFullscreen().then(() => {
+          setIsFullscreen(true);
+        }).catch(() => {
+          if (video && (video as any).webkitEnterFullscreen) {
+            (video as any).webkitEnterFullscreen();
+          }
+        });
+      } else if (video && (video as any).webkitEnterFullscreen) {
+        // iPhone iOS Safari fallback
+        (video as any).webkitEnterFullscreen();
+      }
     } else {
-      document.exitFullscreen().then(() => {
-        setIsFullscreen(false);
-      }).catch((err) => {
-        console.warn('Exit fullscreen failed:', err);
-      });
+      if (document.exitFullscreen) {
+        document.exitFullscreen().then(() => {
+          setIsFullscreen(false);
+        }).catch(() => {});
+      }
     }
   };
 
@@ -160,7 +170,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   return (
     <div
       ref={containerRef}
-      className="relative flex flex-col h-screen w-screen bg-background overflow-hidden select-none"
+      className="relative flex flex-col h-[100dvh] w-screen max-w-full max-h-[100dvh] bg-background overflow-hidden select-none"
     >
       {/* Main Central View Area (Full Screen) */}
       <main className="relative flex-1 flex items-center justify-center p-0 overflow-hidden bg-background">
@@ -191,6 +201,8 @@ export const RoomPage: React.FC<RoomPageProps> = ({
               ref={videoRef}
               autoPlay
               playsInline
+              // @ts-ignore
+              webkit-playsinline="true"
               muted
               onLoadedMetadata={(e) => {
                 e.currentTarget.play().catch(() => {});

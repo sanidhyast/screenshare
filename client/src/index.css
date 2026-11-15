@@ -3,10 +3,22 @@
 @tailwind utilities;
 
 @layer base {
-  body {
+  html, body {
     @apply bg-background text-content-primary font-sans antialiased;
     overflow-x: hidden;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
   }
+}
+
+/* Hide scrollbar for clean horizontal toolbar scrolling if screen is ultra-narrow */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 /* Glassmorphism utility */

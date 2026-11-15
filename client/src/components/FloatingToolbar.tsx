@@ -65,15 +65,15 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
 
   return (
     <>
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40">
-        <div className="glass-toolbar px-3 py-2 rounded-2xl flex items-center gap-1.5 sm:gap-2 shadow-2xl border border-surface-border">
+      <div className="fixed bottom-3 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 max-w-[calc(100vw-1rem)] px-1 pointer-events-auto">
+        <div className="glass-toolbar px-2 sm:px-3 py-1.5 sm:py-2 rounded-2xl flex items-center gap-1 sm:gap-2 shadow-2xl border border-surface-border overflow-x-auto no-scrollbar">
           {/* HOST CONTROLS */}
           {isHost ? (
             <>
               {/* Start / Stop Sharing */}
               <button
                 onClick={onToggleSharing}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-medium transition-all duration-200 ${
+                className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-medium transition-all duration-200 shrink-0 ${
                   isSharing
                     ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30'
                     : 'bg-accent hover:bg-accent-hover text-white shadow-md shadow-accent/25'
@@ -83,12 +83,14 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
                 {isSharing ? (
                   <>
                     <MonitorOff className="w-4 h-4" />
-                    <span>Stop Sharing</span>
+                    <span className="hidden sm:inline">Stop Sharing</span>
+                    <span className="sm:hidden">Stop</span>
                   </>
                 ) : (
                   <>
                     <MonitorUp className="w-4 h-4" />
-                    <span>Share Screen</span>
+                    <span className="hidden sm:inline">Share Screen</span>
+                    <span className="sm:hidden">Share</span>
                   </>
                 )}
               </button>
@@ -241,11 +243,11 @@ export const FloatingToolbar: React.FC<FloatingToolbarProps> = ({
               {/* Leave Room */}
               <button
                 onClick={onLeaveRoom}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs sm:text-sm font-medium text-content-secondary hover:text-content-primary hover:bg-surface-hover transition-colors"
+                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-medium text-content-secondary hover:text-content-primary hover:bg-surface-hover transition-colors shrink-0"
                 title="Leave room"
               >
                 <LogOut className="w-4 h-4" />
-                <span>Leave</span>
+                <span className="hidden sm:inline">Leave</span>
               </button>
             </>
           )}

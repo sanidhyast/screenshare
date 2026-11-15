@@ -75,12 +75,12 @@ export const HomePage: React.FC<HomePageProps> = ({
   };
 
   return (
-    <div className="min-h-screen w-screen bg-background flex flex-col items-center justify-center p-4 relative overflow-hidden select-none">
+    <div className="min-h-[100dvh] w-screen bg-background flex flex-col items-center justify-center p-4 relative overflow-hidden select-none">
       {/* Subtle ambient glow */}
-      <div className="absolute w-[400px] h-[300px] bg-accent/10 rounded-full blur-[130px] pointer-events-none" />
+      <div className="absolute w-[320px] sm:w-[400px] h-[300px] bg-accent/10 rounded-full blur-[130px] pointer-events-none" />
 
       {/* Main Container */}
-      <div className="w-full max-w-xs sm:max-w-sm flex flex-col items-center gap-4 z-10">
+      <div className="w-full max-w-[320px] sm:max-w-sm flex flex-col items-center gap-3.5 sm:gap-4 z-10 px-2 sm:px-0">
         {/* Error notification banner if any */}
         {errorMessage && (
           <div className="w-full p-3 rounded-xl bg-red-500/10 border border-red-500/25 flex items-center gap-2.5 text-red-400 text-xs sm:text-sm animate-in fade-in duration-200">
@@ -93,7 +93,7 @@ export const HomePage: React.FC<HomePageProps> = ({
         <button
           onClick={handleCreateRoom}
           disabled={isCreating}
-          className="w-full py-3.5 px-6 rounded-2xl font-medium text-base bg-accent hover:bg-accent-hover text-white transition-all shadow-lg shadow-accent/25 active:scale-[0.98] disabled:opacity-50 flex items-center justify-center"
+          className="w-full min-h-[48px] py-3.5 px-6 rounded-2xl font-medium text-base bg-accent hover:bg-accent-hover active:bg-accent-hover text-white transition-all shadow-lg shadow-accent/25 active:scale-[0.98] disabled:opacity-50 flex items-center justify-center"
         >
           <span>{isCreating ? 'Creating Room...' : 'Create Room'}</span>
         </button>
@@ -112,12 +112,15 @@ export const HomePage: React.FC<HomePageProps> = ({
             placeholder="Enter Room Code"
             value={joinCode}
             onChange={(e) => setJoinCode(e.target.value)}
-            className="w-full px-4 py-3 rounded-2xl bg-surface border border-surface-border text-content-primary placeholder:text-content-muted focus:outline-none focus:border-accent transition-colors text-sm font-mono text-center tracking-wider"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            className="w-full min-h-[48px] px-4 py-3 rounded-2xl bg-surface border border-surface-border text-content-primary placeholder:text-content-muted focus:outline-none focus:border-accent transition-colors text-base sm:text-sm font-mono text-center tracking-wider"
           />
           <button
             type="submit"
             disabled={isJoining}
-            className="w-full py-3 px-6 rounded-2xl font-medium text-sm bg-surface hover:bg-surface-hover text-content-primary border border-surface-border transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center"
+            className="w-full min-h-[48px] py-3 px-6 rounded-2xl font-medium text-sm sm:text-base bg-surface hover:bg-surface-hover active:bg-surface-hover text-content-primary border border-surface-border transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center"
           >
             <span>{isJoining ? 'Joining...' : 'Join Room'}</span>
           </button>
