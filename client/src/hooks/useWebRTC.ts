@@ -10,21 +10,21 @@ const ICE_SERVERS: RTCConfiguration = {
   ]
 };
 
-// Boost SDP bitrate up to 25 Mbps with instant high-quality start and zero downscaling
-function boostSdpBitrate(sdp: string, maxBitrateKbps: number = 25000): string {
+// Optimize SDP for ultra-low latency: smooth 60 FPS, 0 jitter buffer delay, and zero packet bloat
+function boostSdpBitrate(sdp: string, maxBitrateKbps: number = 5000): string {
   let modified = sdp.replace(/b=AS:\d+\r?\n/g, '');
   modified = modified.replace(/b=TIAS:\d+\r?\n/g, '');
 
-  // Add high bandwidth limits
+  // Optimal bandwidth limit: 5 Mbps (5000 kbps) delivers crisp 1080p 60fps without choking network buffers
   modified = modified.replace(
     /(m=video[^\r\n]*\r?\n)/,
     `$1b=AS:${maxBitrateKbps}\r\nb=TIAS:${maxBitrateKbps * 1000}\r\n`
   );
 
-  // Set minimum 6 Mbps, starting 12 Mbps, maximum 25 Mbps in video codec format parameters
+  // Min 1.5 Mbps, start 3.5 Mbps, max 5 Mbps
   modified = modified.replace(
     /(a=fmtp:\d+ [^\r\n]*)/g,
-    `$1;x-google-min-bitrate=6000;x-google-max-bitrate=${maxBitrateKbps};x-google-start-bitrate=12000`
+    `$1;x-google-min-bitrate=1500;x-google-max-bitrate=${maxBitrateKbps};x-google-start-bitrate=3500`
   );
 
   return modified;
@@ -101,21 +101,39 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          params.encodings[0].maxBitrate = 25000000; // 25 Mbps crystal-clear high quality
-          params.encodings[0].maxFramerate = 60; // Up to 60 FPS
+          // 5 Mbps: Crisp 1080p 60fps streaming with zero bufferbloat or frame queuing lag
+          params.encodings[0].maxBitrate = 5000000;
+          params.encodings[0].maxFramerate = 60;
           // @ts-ignore
-          params.encodings[0].scaleResolutionDownBy = 1.0; // Strictly prevent downscaling
+          params.encodings[0].scaleResolutionDownBy = 1.0;
           // @ts-ignore
           params.encodings[0].networkPriority = 'high';
           // @ts-ignore
           params.encodings[0].priority = 'high';
           // @ts-ignore
-          params.degradationPreference = 'maintain-resolution'; // Never sacrifice sharpness or text clarity
+          params.degradationPreference = 'maintain-resolution';
           sender.setParameters(params).catch(() => {});
         } catch {
           // fallback
         }
       });
+
+      // Prioritize H.264 hardware-accelerated video codec for instantaneous encoding
+      try {
+        const transceivers = pc.getTransceivers();
+        transceivers.forEach((transceiver) => {
+          const capabilities = RTCRtpReceiver.getCapabilities('video');
+          if (capabilities && capabilities.codecs && 'setCodecPreferences' in transceiver) {
+            const h264 = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
+            const others = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() !== 'video/h264');
+            if (h264.length > 0) {
+              transceiver.setCodecPreferences([...h264, ...others]);
+            }
+          }
+        });
+      } catch {
+        // Fallback
+      }
 
       // Handle ICE candidates
       pc.onicecandidate = (event) => {
@@ -135,11 +153,11 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         }
       };
 
-      // Create and send SDP Offer with 25 Mbps boosted bitrate
+      // Create and send SDP Offer with low-latency bandwidth
       try {
         const offer = await pc.createOffer();
         if (offer.sdp) {
-          offer.sdp = boostSdpBitrate(offer.sdp, 25000);
+          offer.sdp = boostSdpBitrate(offer.sdp, 5000);
         }
         await pc.setLocalDescription(offer);
 
@@ -185,8 +203,8 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           frameRate: { ideal: 60, max: 60 },
-          width: { ideal: 1920, max: 3840 },
-          height: { ideal: 1080, max: 2160 }
+          width: { ideal: 1920, max: 2560 },
+          height: { ideal: 1080, max: 1440 }
         },
         audio: false
       });
@@ -332,9 +350,14 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         const pc = new RTCPeerConnection(ICE_SERVERS);
         viewerPeerConnectionRef.current = pc;
 
-        // Collect incoming remote tracks
+        // Collect incoming remote tracks with zero jitter-buffer latency
         pc.ontrack = (event) => {
           console.log('[Viewer] Remote track received:', event.track.kind);
+          // Zero playout delay hint: plays frames immediately with 0ms buffering delay
+          if (event.receiver && 'playoutDelayHint' in event.receiver) {
+            (event.receiver as any).playoutDelayHint = 0;
+          }
+
           if (event.streams && event.streams[0]) {
             setRemoteStream(event.streams[0]);
           } else if (event.track) {
@@ -373,7 +396,7 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
 
           const answer = await pc.createAnswer();
           if (answer.sdp) {
-            answer.sdp = boostSdpBitrate(answer.sdp, 25000);
+            answer.sdp = boostSdpBitrate(answer.sdp, 5000);
           }
           await pc.setLocalDescription(answer);
 
