@@ -64,40 +64,97 @@ export const RoomPage: React.FC<RoomPageProps> = ({
     }
   }, [isHost, localStream, remoteStream]);
 
-  // Handle Fullscreen with iOS Safari webkit fallback
+  // Cross-browser & cross-device Fullscreen Toggle (PC, Android, iOS Safari iPhone/iPad)
   const handleToggleFullscreen = () => {
     const video = videoRef.current;
     const container = containerRef.current;
+    const doc = document as any;
 
-    if (!document.fullscreenElement && !(video as any)?.webkitDisplayingFullscreen) {
-      if (container?.requestFullscreen) {
-        container.requestFullscreen().then(() => {
+    const isCurrentlyFullscreen = Boolean(
+      doc.fullscreenElement ||
+      doc.webkitFullscreenElement ||
+      doc.mozFullScreenElement ||
+      doc.msFullscreenElement ||
+      (video as any)?.webkitDisplayingFullscreen
+    );
+
+    if (!isCurrentlyFullscreen) {
+      // 1. Try standard / vendor Element.requestFullscreen (Desktop, Android, iPad)
+      const requestMethod =
+        container?.requestFullscreen ||
+        (container as any)?.webkitRequestFullscreen ||
+        (container as any)?.mozRequestFullScreen ||
+        (container as any)?.msRequestFullscreen;
+
+      if (requestMethod) {
+        requestMethod.call(container).then(() => {
           setIsFullscreen(true);
         }).catch(() => {
+          // Fallback to video webkit fullscreen (iPhone iOS)
           if (video && (video as any).webkitEnterFullscreen) {
             (video as any).webkitEnterFullscreen();
           }
         });
       } else if (video && (video as any).webkitEnterFullscreen) {
-        // iPhone iOS Safari fallback
+        // iPhone iOS Safari (does not support element.requestFullscreen on arbitrary elements)
         (video as any).webkitEnterFullscreen();
       }
     } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen().then(() => {
-          setIsFullscreen(false);
-        }).catch(() => {});
+      // Exit fullscreen
+      if ((video as any)?.webkitDisplayingFullscreen && (video as any)?.webkitExitFullscreen) {
+        (video as any).webkitExitFullscreen();
+        setIsFullscreen(false);
+      } else {
+        const exitMethod =
+          doc.exitFullscreen ||
+          doc.webkitExitFullscreen ||
+          doc.mozCancelFullScreen ||
+          doc.msExitFullscreen;
+
+        if (exitMethod) {
+          exitMethod.call(doc).then(() => {
+            setIsFullscreen(false);
+          }).catch(() => {});
+        }
       }
     }
   };
 
   useEffect(() => {
-    const onFullscreenChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+    const video = videoRef.current;
+    const doc = document as any;
+
+    const updateFullscreenState = () => {
+      const isFs = Boolean(
+        doc.fullscreenElement ||
+        doc.webkitFullscreenElement ||
+        doc.mozFullScreenElement ||
+        doc.msFullscreenElement ||
+        (video as any)?.webkitDisplayingFullscreen
+      );
+      setIsFullscreen(isFs);
     };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
-  }, []);
+
+    const events = ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange'];
+    events.forEach((ev) => document.addEventListener(ev, updateFullscreenState));
+
+    // iOS Safari specific fullscreen events on the <video> element
+    const onIOSBeginFS = () => setIsFullscreen(true);
+    const onIOSEndFS = () => setIsFullscreen(false);
+
+    if (video) {
+      video.addEventListener('webkitbeginfullscreen', onIOSBeginFS);
+      video.addEventListener('webkitendfullscreen', onIOSEndFS);
+    }
+
+    return () => {
+      events.forEach((ev) => document.removeEventListener(ev, updateFullscreenState));
+      if (video) {
+        video.removeEventListener('webkitbeginfullscreen', onIOSBeginFS);
+        video.removeEventListener('webkitendfullscreen', onIOSEndFS);
+      }
+    };
+  }, [remoteStream, localStream]);
 
   // Room lifecycle socket events
   useEffect(() => {
