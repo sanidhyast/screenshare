@@ -264,20 +264,10 @@ io.on('connection', (socket: Socket) => {
     const roomId = result.roomId;
 
     if (result.wasHost) {
-      // Host temporarily disconnected: notify viewers
+      // Host temporarily disconnected: notify viewers but keep room alive indefinitely
       socket.to(roomId).emit('host-disconnected', {
-        message: 'The host was disconnected. Waiting for host to reconnect...',
-        gracePeriodMs: 45000
+        message: 'The host is temporarily disconnected. Waiting for host to reconnect...'
       });
-
-      // Schedule room termination if host does not reconnect
-      setTimeout(() => {
-        const room = roomManager.getRoom(roomId);
-        if (room && room.hostDisconnectedAt !== null) {
-          io.to(roomId).emit('room-ended', { reason: 'The host has left and the session has ended.' });
-          roomManager.endRoom(roomId);
-        }
-      }, 45000);
     } else {
       // Viewer disconnected: update viewer count and notify host
       io.to(roomId).emit('viewer-count-updated', { count: result.viewerCount });
