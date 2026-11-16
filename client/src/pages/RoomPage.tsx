@@ -28,7 +28,6 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [fitMode, setFitMode] = useState<'contain' | 'cover'>('contain');
-  const [isVideoReady, setIsVideoReady] = useState<boolean>(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -44,8 +43,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   } = useWebRTC({
     socket,
     roomId,
-    isHost,
-    hostToken
+    isHost
   });
 
   // Attach local or remote media stream to the <video> element
@@ -58,32 +56,11 @@ export const RoomPage: React.FC<RoomPageProps> = ({
     if (streamToPlay) {
       video.srcObject = streamToPlay;
       video.muted = true;
-      video.playsInline = true;
-      const p = video.play();
-      if (p !== undefined) {
-        p.then(() => {
-          setIsVideoReady(true);
-        }).catch((err) => {
-          console.warn('Autoplay prevented or interrupted:', err);
-          setIsVideoReady(true);
-        });
-      }
+      video.play().catch((err) => {
+        console.warn('Autoplay prevented or interrupted:', err);
+      });
     } else {
       video.srcObject = null;
-      setIsVideoReady(false);
-    }
-  }, [isHost, localStream, remoteStream]);
-
-  // Safety watchdog: Automatically dismiss connecting spinner once stream is present
-  useEffect(() => {
-    const hasStream = isHost ? Boolean(localStream) : Boolean(remoteStream);
-    if (hasStream) {
-      const timer = setTimeout(() => {
-        setIsVideoReady(true);
-      }, 1200);
-      return () => clearTimeout(timer);
-    } else {
-      setIsVideoReady(false);
     }
   }, [isHost, localStream, remoteStream]);
 
@@ -183,39 +160,30 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   useEffect(() => {
     if (!socket) return;
 
-    const joinCurrentRoom = () => {
-      socket.emit(
-        'join-room',
-        { roomId, hostToken },
-        (response: {
-          success: boolean;
-          isHost?: boolean;
-          isSharing?: boolean;
-          isHostConnected?: boolean;
-          viewerCount?: number;
-          error?: string;
-        }) => {
-          if (response?.success) {
-            if (typeof response.isHost === 'boolean') {
-              setIsHost(response.isHost);
-            }
-            if (typeof response.isHostConnected === 'boolean') {
-              setIsHostConnected(response.isHostConnected);
-            }
-            if (!response.isHost && response.isSharing) {
-              socket.emit('request-stream', { roomId });
-            }
-          } else {
-            setRoomEndedMessage(response?.error || 'Failed to join this room.');
+    // Join room event initialization
+    socket.emit(
+      'join-room',
+      { roomId, hostToken },
+      (response: {
+        success: boolean;
+        isHost?: boolean;
+        isSharing?: boolean;
+        isHostConnected?: boolean;
+        viewerCount?: number;
+        error?: string;
+      }) => {
+        if (response?.success) {
+          if (typeof response.isHost === 'boolean') {
+            setIsHost(response.isHost);
           }
+          if (typeof response.isHostConnected === 'boolean') {
+            setIsHostConnected(response.isHostConnected);
+          }
+        } else {
+          setRoomEndedMessage(response?.error || 'Failed to join this room.');
         }
-      );
-    };
-
-    if (socket.connected) {
-      joinCurrentRoom();
-    }
-    socket.on('connect', joinCurrentRoom);
+      }
+    );
 
     // Room Ended
     const handleRoomEnded = ({ reason }: { reason: string }) => {
@@ -233,32 +201,18 @@ export const RoomPage: React.FC<RoomPageProps> = ({
       setIsHostConnected(true);
       setToastMessage('Host has reconnected.');
       setTimeout(() => setToastMessage(null), 3000);
-      if (!isHost) {
-        socket.emit('request-stream', { roomId });
-      }
-    };
-
-    // Host Started Sharing
-    const handleHostStartedSharing = () => {
-      setIsHostConnected(true);
-      if (!isHost) {
-        socket.emit('request-stream', { roomId });
-      }
     };
 
     socket.on('room-ended', handleRoomEnded);
     socket.on('host-disconnected', handleHostDisconnected);
     socket.on('host-reconnected', handleHostReconnected);
-    socket.on('host-started-sharing', handleHostStartedSharing);
 
     return () => {
-      socket.off('connect', joinCurrentRoom);
       socket.off('room-ended', handleRoomEnded);
       socket.off('host-disconnected', handleHostDisconnected);
       socket.off('host-reconnected', handleHostReconnected);
-      socket.off('host-started-sharing', handleHostStartedSharing);
     };
-  }, [socket, roomId, hostToken, isHost]);
+  }, [socket, roomId, hostToken]);
 
   // Host End Room
   const handleHostEndRoom = () => {
@@ -307,27 +261,13 @@ export const RoomPage: React.FC<RoomPageProps> = ({
               // @ts-ignore
               webkit-playsinline="true"
               muted
-              onLoadedMetadata={() => setIsVideoReady(true)}
-              onLoadedData={() => setIsVideoReady(true)}
-              onPlaying={() => setIsVideoReady(true)}
-              onCanPlay={() => setIsVideoReady(true)}
-              onTimeUpdate={() => setIsVideoReady(true)}
-              className={`w-full h-full ${
+              onLoadedMetadata={(e) => {
+                e.currentTarget.play().catch(() => {});
+              }}
+              className={`w-full h-full transition-all duration-150 ${
                 fitMode === 'cover' ? 'object-cover' : 'object-contain'
               }`}
             />
-
-            {/* Seamless connecting animation until first frame is rendered */}
-            {!isVideoReady && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/80 backdrop-blur-sm z-20 pointer-events-none transition-opacity duration-300">
-                <div className="w-12 h-12 rounded-2xl bg-surface border border-surface-border flex items-center justify-center shadow-xl relative mb-3">
-                  <span className="w-3 h-3 rounded-full bg-accent animate-ping" />
-                </div>
-                <p className="text-xs sm:text-sm text-content-secondary font-medium tracking-wide">
-                  Connecting live stream...
-                </p>
-              </div>
-            )}
           </div>
         ) : (
           <WaitingPlaceholder

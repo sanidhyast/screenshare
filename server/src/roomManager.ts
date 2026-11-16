@@ -188,8 +188,8 @@ export class RoomManager {
   private cleanupExpiredRooms(): void {
     const now = Date.now();
     for (const [id, room] of this.rooms.entries()) {
-      // Keep rooms alive indefinitely until explicitly ended by user; 7-day safety retention
-      if (now - room.createdAt > 7 * 24 * 60 * 60 * 1000) {
+      // Only clean up if the host closed the browser/disconnected and never returned within grace period
+      if (room.hostDisconnectedAt && now - room.hostDisconnectedAt > this.HOST_RECONNECT_GRACE_MS) {
         this.endRoom(id);
       }
     }

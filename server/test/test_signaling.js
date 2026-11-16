@@ -6,7 +6,7 @@ async function testSignaling() {
   const serverUrl = 'http://localhost:4000';
 
   // 1. Connect Host
-  const hostSocket = io(serverUrl, { transports: ['websocket'] });
+  const hostSocket = io(serverUrl);
   await new Promise((resolve) => hostSocket.on('connect', resolve));
   console.log('✓ Host connected to Socket.IO server (ID:', hostSocket.id, ')');
 
@@ -22,7 +22,7 @@ async function testSignaling() {
   const hostToken = createRes.hostToken;
 
   // 3. Connect Viewer
-  const viewerSocket = io(serverUrl, { transports: ['websocket'] });
+  const viewerSocket = io(serverUrl);
   await new Promise((resolve) => viewerSocket.on('connect', resolve));
   console.log('✓ Viewer connected to Socket.IO server (ID:', viewerSocket.id, ')');
 
@@ -61,7 +61,7 @@ async function testSignaling() {
   });
 
   const shareRes = await new Promise((resolve) => {
-    hostSocket.emit('host-started-sharing', { roomId, hostToken }, resolve);
+    hostSocket.emit('host-started-sharing', { roomId }, resolve);
   });
   console.log('✓ Host started sharing response:', shareRes);
   if (!shareRes.success || !shareRes.viewers.includes(viewerSocket.id)) {

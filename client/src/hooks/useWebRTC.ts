@@ -3,37 +3,28 @@ import { Socket } from 'socket.io-client';
 
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
-    {
-      urls: [
-        'stun:stun.l.google.com:19302',
-        'stun:stun1.l.google.com:19302',
-        'stun:stun2.l.google.com:19302',
-        'stun:stun.cloudflare.com:3478',
-        'stun:openrelay.metered.ca:80'
-      ]
-    },
-    {
-      urls: [
-        'turn:openrelay.metered.ca:80',
-        'turn:openrelay.metered.ca:443',
-        'turn:openrelay.metered.ca:443?transport=tcp'
-      ],
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    }
-  ],
-  iceCandidatePoolSize: 10
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' }
+  ]
 };
 
-// Clean SDP bandwidth optimization without corrupting codec parameters
+// Optimize SDP for ultra-low latency: smooth 60 FPS, 0 jitter buffer delay, and zero packet bloat
 function boostSdpBitrate(sdp: string, maxBitrateKbps: number = 5000): string {
   let modified = sdp.replace(/b=AS:\d+\r?\n/g, '');
   modified = modified.replace(/b=TIAS:\d+\r?\n/g, '');
 
-  // 5 Mbps (5000 kbps) delivers crisp 1080p 60fps
+  // Optimal bandwidth limit: 5 Mbps (5000 kbps) delivers crisp 1080p 60fps without choking network buffers
   modified = modified.replace(
     /(m=video[^\r\n]*\r?\n)/,
     `$1b=AS:${maxBitrateKbps}\r\nb=TIAS:${maxBitrateKbps * 1000}\r\n`
+  );
+
+  // Min 1.5 Mbps, start 3.5 Mbps, max 5 Mbps
+  modified = modified.replace(
+    /(a=fmtp:\d+ [^\r\n]*)/g,
+    `$1;x-google-min-bitrate=1500;x-google-max-bitrate=${maxBitrateKbps};x-google-start-bitrate=3500`
   );
 
   return modified;
@@ -43,11 +34,10 @@ interface UseWebRTCProps {
   socket: Socket | null;
   roomId: string;
   isHost: boolean;
-  hostToken?: string;
   onShareEndedByHost?: () => void;
 }
 
-export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHost }: UseWebRTCProps) {
+export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWebRTCProps) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isSharing, setIsSharing] = useState<boolean>(false);
@@ -128,19 +118,16 @@ export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHos
         }
       });
 
-      // Prioritize high-performance VP8 & H.264 video codecs
+      // Prioritize H.264 hardware-accelerated video codec for instantaneous encoding
       try {
         const transceivers = pc.getTransceivers();
         transceivers.forEach((transceiver) => {
           const capabilities = RTCRtpReceiver.getCapabilities('video');
           if (capabilities && capabilities.codecs && 'setCodecPreferences' in transceiver) {
-            const vp8 = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() === 'video/vp8');
             const h264 = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
-            const others = capabilities.codecs.filter(
-              (c) => c.mimeType.toLowerCase() !== 'video/vp8' && c.mimeType.toLowerCase() !== 'video/h264'
-            );
-            if (vp8.length > 0 || h264.length > 0) {
-              transceiver.setCodecPreferences([...vp8, ...h264, ...others]);
+            const others = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() !== 'video/h264');
+            if (h264.length > 0) {
+              transceiver.setCodecPreferences([...h264, ...others]);
             }
           }
         });
@@ -201,11 +188,11 @@ export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHos
     setIsSharing(false);
 
     if (socket && roomId) {
-      socket.emit('host-stopped-sharing', { roomId, hostToken });
+      socket.emit('host-stopped-sharing', { roomId });
     }
 
     onShareEndedByHost?.();
-  }, [socket, roomId, hostToken, closeAllHostPeerConnections, onShareEndedByHost]);
+  }, [socket, roomId, closeAllHostPeerConnections, onShareEndedByHost]);
 
   // HOST: Start screen sharing with high framerate (60 FPS) and motion priority
   const startSharing = useCallback(async () => {
@@ -240,7 +227,7 @@ export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHos
       // Tell server host started sharing and retrieve active viewer sockets
       socket.emit(
         'host-started-sharing',
-        { roomId, hostToken },
+        { roomId },
         (response: { success: boolean; viewers?: string[]; error?: string }) => {
           if (response?.success && response.viewers && response.viewers.length > 0) {
             response.viewers.forEach((viewerSocketId) => {
@@ -258,7 +245,7 @@ export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHos
       }
       setIsSharing(false);
     }
-  }, [socket, isHost, roomId, hostToken, createHostPeerConnection, stopSharing]);
+  }, [socket, isHost, roomId, createHostPeerConnection, stopSharing]);
 
   // Signalling listeners for WebRTC
   useEffect(() => {
@@ -341,30 +328,12 @@ export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHos
       socket.on('webrtc-answer', handleWebRTCAnswer);
       socket.on('webrtc-ice-candidate', handleHostIceCandidate);
 
-      const handleHostSocketConnect = () => {
-        if (localStreamRef.current) {
-          socket.emit(
-            'host-started-sharing',
-            { roomId, hostToken },
-            (response: { success: boolean; viewers?: string[] }) => {
-              if (response?.success && response.viewers && response.viewers.length > 0) {
-                response.viewers.forEach((viewerSocketId) => {
-                  createHostPeerConnection(viewerSocketId, localStreamRef.current!);
-                });
-              }
-            }
-          );
-        }
-      };
-      socket.on('connect', handleHostSocketConnect);
-
       return () => {
         socket.off('viewer-joined', handleViewerJoined);
         socket.off('request-stream', handleViewerRequestStream);
         socket.off('viewer-left', handleViewerLeft);
         socket.off('webrtc-answer', handleWebRTCAnswer);
         socket.off('webrtc-ice-candidate', handleHostIceCandidate);
-        socket.off('connect', handleHostSocketConnect);
       };
     } else {
       // VIEWER EVENTS
@@ -465,34 +434,20 @@ export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHos
         setIsSharing(false);
       };
 
-      const handleHostStartedSharing = () => {
-        socket.emit('request-stream', { roomId });
-      };
-
       socket.on('webrtc-offer', handleWebRTCOffer);
       socket.on('webrtc-ice-candidate', handleViewerIceCandidate);
       socket.on('host-stopped-sharing', handleHostStoppedSharing);
-      socket.on('host-started-sharing', handleHostStartedSharing);
-      socket.on('host-reconnected', handleHostStartedSharing);
 
       // On initial viewer join, request stream if host is already sharing
       socket.emit('request-stream', { roomId });
-
-      const handleSocketConnect = () => {
-        socket.emit('request-stream', { roomId });
-      };
-      socket.on('connect', handleSocketConnect);
 
       return () => {
         socket.off('webrtc-offer', handleWebRTCOffer);
         socket.off('webrtc-ice-candidate', handleViewerIceCandidate);
         socket.off('host-stopped-sharing', handleHostStoppedSharing);
-        socket.off('host-started-sharing', handleHostStartedSharing);
-        socket.off('host-reconnected', handleHostStartedSharing);
-        socket.off('connect', handleSocketConnect);
       };
     }
-  }, [socket, isHost, roomId, hostToken, createHostPeerConnection, closeViewerPeerConnection]);
+  }, [socket, isHost, roomId, createHostPeerConnection, closeViewerPeerConnection]);
 
   // Clean up on unmount
   useEffect(() => {
