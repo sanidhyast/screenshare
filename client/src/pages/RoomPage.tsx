@@ -56,19 +56,33 @@ export const RoomPage: React.FC<RoomPageProps> = ({
     const streamToPlay = isHost ? localStream : remoteStream;
 
     if (streamToPlay) {
-      setIsVideoReady(false);
       video.srcObject = streamToPlay;
       video.muted = true;
+      video.playsInline = true;
       const p = video.play();
       if (p !== undefined) {
         p.then(() => {
           setIsVideoReady(true);
         }).catch((err) => {
           console.warn('Autoplay prevented or interrupted:', err);
+          setIsVideoReady(true);
         });
       }
     } else {
       video.srcObject = null;
+      setIsVideoReady(false);
+    }
+  }, [isHost, localStream, remoteStream]);
+
+  // Safety watchdog: Automatically dismiss connecting spinner once stream is present
+  useEffect(() => {
+    const hasStream = isHost ? Boolean(localStream) : Boolean(remoteStream);
+    if (hasStream) {
+      const timer = setTimeout(() => {
+        setIsVideoReady(true);
+      }, 1200);
+      return () => clearTimeout(timer);
+    } else {
       setIsVideoReady(false);
     }
   }, [isHost, localStream, remoteStream]);
@@ -297,14 +311,15 @@ export const RoomPage: React.FC<RoomPageProps> = ({
               onLoadedData={() => setIsVideoReady(true)}
               onPlaying={() => setIsVideoReady(true)}
               onCanPlay={() => setIsVideoReady(true)}
-              className={`w-full h-full transition-opacity duration-200 ${
-                isVideoReady ? 'opacity-100' : 'opacity-0'
-              } ${fitMode === 'cover' ? 'object-cover' : 'object-contain'}`}
+              onTimeUpdate={() => setIsVideoReady(true)}
+              className={`w-full h-full ${
+                fitMode === 'cover' ? 'object-cover' : 'object-contain'
+              }`}
             />
 
             {/* Seamless connecting animation until first frame is rendered */}
             {!isVideoReady && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-background z-20">
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/80 backdrop-blur-sm z-20 pointer-events-none transition-opacity duration-300">
                 <div className="w-12 h-12 rounded-2xl bg-surface border border-surface-border flex items-center justify-center shadow-xl relative mb-3">
                   <span className="w-3 h-3 rounded-full bg-accent animate-ping" />
                 </div>

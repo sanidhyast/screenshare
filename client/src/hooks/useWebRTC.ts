@@ -7,37 +7,34 @@ const ICE_SERVERS: RTCConfiguration = {
       urls: [
         'stun:stun.l.google.com:19302',
         'stun:stun1.l.google.com:19302',
-        'stun:stun2.l.google.com:19302'
+        'stun:stun2.l.google.com:19302',
+        'stun:stun.cloudflare.com:3478',
+        'stun:openrelay.metered.ca:80'
       ]
+    },
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp'
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
     }
   ],
   iceCandidatePoolSize: 10
 };
 
-// Optimize SDP for ultra-low latency: smooth 60 FPS, 0 jitter buffer delay, and instant keyframes
+// Clean SDP bandwidth optimization without corrupting codec parameters
 function boostSdpBitrate(sdp: string, maxBitrateKbps: number = 5000): string {
   let modified = sdp.replace(/b=AS:\d+\r?\n/g, '');
   modified = modified.replace(/b=TIAS:\d+\r?\n/g, '');
 
-  // Optimal bandwidth limit: 5 Mbps (5000 kbps) delivers crisp 1080p 60fps without choking network buffers
+  // 5 Mbps (5000 kbps) delivers crisp 1080p 60fps
   modified = modified.replace(
     /(m=video[^\r\n]*\r?\n)/,
     `$1b=AS:${maxBitrateKbps}\r\nb=TIAS:${maxBitrateKbps * 1000}\r\n`
   );
-
-  // Min 1.5 Mbps, start 3.5 Mbps, max 5 Mbps
-  modified = modified.replace(
-    /(a=fmtp:\d+ [^\r\n]*)/g,
-    `$1;x-google-min-bitrate=1500;x-google-max-bitrate=${maxBitrateKbps};x-google-start-bitrate=3500`
-  );
-
-  // Force immediate Picture Loss Indication (PLI) and FIR keyframe requests so video renders instantly
-  if (!modified.includes('a=rtcp-fb:* nack pli') && !modified.includes('a=rtcp-fb:101 nack pli')) {
-    modified = modified.replace(
-      /(a=rtpmap:\d+ [^\r\n]*\r?\n)/g,
-      `$1a=rtcp-fb:* nack pli\r\na=rtcp-fb:* ccm fir\r\n`
-    );
-  }
 
   return modified;
 }
@@ -131,16 +128,19 @@ export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHos
         }
       });
 
-      // Prioritize H.264 hardware-accelerated video codec for instantaneous encoding
+      // Prioritize high-performance VP8 & H.264 video codecs
       try {
         const transceivers = pc.getTransceivers();
         transceivers.forEach((transceiver) => {
           const capabilities = RTCRtpReceiver.getCapabilities('video');
           if (capabilities && capabilities.codecs && 'setCodecPreferences' in transceiver) {
+            const vp8 = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() === 'video/vp8');
             const h264 = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
-            const others = capabilities.codecs.filter((c) => c.mimeType.toLowerCase() !== 'video/h264');
-            if (h264.length > 0) {
-              transceiver.setCodecPreferences([...h264, ...others]);
+            const others = capabilities.codecs.filter(
+              (c) => c.mimeType.toLowerCase() !== 'video/vp8' && c.mimeType.toLowerCase() !== 'video/h264'
+            );
+            if (vp8.length > 0 || h264.length > 0) {
+              transceiver.setCodecPreferences([...vp8, ...h264, ...others]);
             }
           }
         });
