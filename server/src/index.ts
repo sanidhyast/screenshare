@@ -103,11 +103,12 @@ io.on('connection', (socket: Socket) => {
       const reclaimed = roomManager.reclaimHost(cleanId, socket.id, hostToken);
       if (reclaimed) {
         socket.join(cleanId);
-        socket.to(cleanId).emit('host-reconnected');
+        io.to(cleanId).emit('host-reconnected');
         return callback?.({
           success: true,
           isHost: true,
           isSharing: room.isSharing,
+          isHostConnected: true,
           viewerCount: room.viewers.size,
           existingViewers: Array.from(room.viewers.keys())
         });
@@ -142,26 +143,41 @@ io.on('connection', (socket: Socket) => {
   });
 
   // 4. Host Screen Sharing Lifecycle
-  socket.on('host-started-sharing', ({ roomId }: { roomId: string }, callback) => {
+  socket.on('host-started-sharing', ({ roomId, hostToken }: { roomId: string; hostToken?: string }, callback) => {
     const cleanId = roomId?.toLowerCase().trim();
     const room = roomManager.getRoom(cleanId);
-    if (!room || room.hostSocketId !== socket.id) {
+    if (!room) {
+      return callback?.({ success: false, error: 'Room does not exist.' });
+    }
+
+    // Reclaim host if token matches, or verify socket ID
+    if (hostToken && room.hostToken === hostToken) {
+      roomManager.reclaimHost(cleanId, socket.id, hostToken);
+    } else if (room.hostSocketId === socket.id) {
+      room.hostDisconnectedAt = null;
+    } else {
       return callback?.({ success: false, error: 'Unauthorized. Only host can share.' });
     }
 
     roomManager.setScreenSharing(cleanId, true);
-    // Broadcast to viewers that host started sharing
-    socket.to(cleanId).emit('host-started-sharing');
+    // Broadcast to viewers that host started sharing and is connected
+    io.to(cleanId).emit('host-started-sharing');
+    io.to(cleanId).emit('host-reconnected');
 
     // Return the list of connected viewer socket IDs to host so host can initiate connections
     const viewerSocketIds = Array.from(room.viewers.keys());
     callback?.({ success: true, viewers: viewerSocketIds });
   });
 
-  socket.on('host-stopped-sharing', ({ roomId }: { roomId: string }) => {
+  socket.on('host-stopped-sharing', ({ roomId, hostToken }: { roomId: string; hostToken?: string }) => {
     const cleanId = roomId?.toLowerCase().trim();
     const room = roomManager.getRoom(cleanId);
-    if (!room || room.hostSocketId !== socket.id) return;
+    if (!room) return;
+    if (hostToken && room.hostToken === hostToken) {
+      roomManager.reclaimHost(cleanId, socket.id, hostToken);
+    } else if (room.hostSocketId !== socket.id) {
+      return;
+    }
 
     roomManager.setScreenSharing(cleanId, false);
     socket.to(cleanId).emit('host-stopped-sharing');
@@ -180,11 +196,6 @@ io.on('connection', (socket: Socket) => {
 
   // 5. WebRTC Signaling Exchanges
   socket.on('webrtc-offer', ({ targetSocketId, sdp }: { targetSocketId: string; sdp: any }) => {
-    const room = roomManager.getRoomBySocket(socket.id);
-    if (!room) return;
-    // Security check: only host can send offers to viewers
-    if (room.hostSocketId !== socket.id) return;
-
     io.to(targetSocketId).emit('webrtc-offer', {
       senderSocketId: socket.id,
       sdp
@@ -192,11 +203,6 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('webrtc-answer', ({ targetSocketId, sdp }: { targetSocketId: string; sdp: any }) => {
-    const room = roomManager.getRoomBySocket(socket.id);
-    if (!room) return;
-    // Security check: answer should target host
-    if (targetSocketId !== room.hostSocketId) return;
-
     io.to(targetSocketId).emit('webrtc-answer', {
       senderSocketId: socket.id,
       sdp
@@ -204,8 +210,6 @@ io.on('connection', (socket: Socket) => {
   });
 
   socket.on('webrtc-ice-candidate', ({ targetSocketId, candidate }: { targetSocketId: string; candidate: any }) => {
-    const room = roomManager.getRoomBySocket(socket.id);
-    if (!room) return;
     if (!targetSocketId) return;
 
     io.to(targetSocketId).emit('webrtc-ice-candidate', {

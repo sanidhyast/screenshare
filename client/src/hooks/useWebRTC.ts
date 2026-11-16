@@ -46,10 +46,11 @@ interface UseWebRTCProps {
   socket: Socket | null;
   roomId: string;
   isHost: boolean;
+  hostToken?: string;
   onShareEndedByHost?: () => void;
 }
 
-export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWebRTCProps) {
+export function useWebRTC({ socket, roomId, isHost, hostToken, onShareEndedByHost }: UseWebRTCProps) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isSharing, setIsSharing] = useState<boolean>(false);
@@ -200,11 +201,11 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
     setIsSharing(false);
 
     if (socket && roomId) {
-      socket.emit('host-stopped-sharing', { roomId });
+      socket.emit('host-stopped-sharing', { roomId, hostToken });
     }
 
     onShareEndedByHost?.();
-  }, [socket, roomId, closeAllHostPeerConnections, onShareEndedByHost]);
+  }, [socket, roomId, hostToken, closeAllHostPeerConnections, onShareEndedByHost]);
 
   // HOST: Start screen sharing with high framerate (60 FPS) and motion priority
   const startSharing = useCallback(async () => {
@@ -239,7 +240,7 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       // Tell server host started sharing and retrieve active viewer sockets
       socket.emit(
         'host-started-sharing',
-        { roomId },
+        { roomId, hostToken },
         (response: { success: boolean; viewers?: string[]; error?: string }) => {
           if (response?.success && response.viewers && response.viewers.length > 0) {
             response.viewers.forEach((viewerSocketId) => {
@@ -257,7 +258,7 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       }
       setIsSharing(false);
     }
-  }, [socket, isHost, roomId, createHostPeerConnection, stopSharing]);
+  }, [socket, isHost, roomId, hostToken, createHostPeerConnection, stopSharing]);
 
   // Signalling listeners for WebRTC
   useEffect(() => {
@@ -340,12 +341,30 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       socket.on('webrtc-answer', handleWebRTCAnswer);
       socket.on('webrtc-ice-candidate', handleHostIceCandidate);
 
+      const handleHostSocketConnect = () => {
+        if (localStreamRef.current) {
+          socket.emit(
+            'host-started-sharing',
+            { roomId, hostToken },
+            (response: { success: boolean; viewers?: string[] }) => {
+              if (response?.success && response.viewers && response.viewers.length > 0) {
+                response.viewers.forEach((viewerSocketId) => {
+                  createHostPeerConnection(viewerSocketId, localStreamRef.current!);
+                });
+              }
+            }
+          );
+        }
+      };
+      socket.on('connect', handleHostSocketConnect);
+
       return () => {
         socket.off('viewer-joined', handleViewerJoined);
         socket.off('request-stream', handleViewerRequestStream);
         socket.off('viewer-left', handleViewerLeft);
         socket.off('webrtc-answer', handleWebRTCAnswer);
         socket.off('webrtc-ice-candidate', handleHostIceCandidate);
+        socket.off('connect', handleHostSocketConnect);
       };
     } else {
       // VIEWER EVENTS
@@ -446,20 +465,34 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         setIsSharing(false);
       };
 
+      const handleHostStartedSharing = () => {
+        socket.emit('request-stream', { roomId });
+      };
+
       socket.on('webrtc-offer', handleWebRTCOffer);
       socket.on('webrtc-ice-candidate', handleViewerIceCandidate);
       socket.on('host-stopped-sharing', handleHostStoppedSharing);
+      socket.on('host-started-sharing', handleHostStartedSharing);
+      socket.on('host-reconnected', handleHostStartedSharing);
 
       // On initial viewer join, request stream if host is already sharing
       socket.emit('request-stream', { roomId });
+
+      const handleSocketConnect = () => {
+        socket.emit('request-stream', { roomId });
+      };
+      socket.on('connect', handleSocketConnect);
 
       return () => {
         socket.off('webrtc-offer', handleWebRTCOffer);
         socket.off('webrtc-ice-candidate', handleViewerIceCandidate);
         socket.off('host-stopped-sharing', handleHostStoppedSharing);
+        socket.off('host-started-sharing', handleHostStartedSharing);
+        socket.off('host-reconnected', handleHostStartedSharing);
+        socket.off('connect', handleSocketConnect);
       };
     }
-  }, [socket, isHost, roomId, createHostPeerConnection, closeViewerPeerConnection]);
+  }, [socket, isHost, roomId, hostToken, createHostPeerConnection, closeViewerPeerConnection]);
 
   // Clean up on unmount
   useEffect(() => {

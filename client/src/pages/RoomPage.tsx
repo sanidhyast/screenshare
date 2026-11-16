@@ -44,7 +44,8 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   } = useWebRTC({
     socket,
     roomId,
-    isHost
+    isHost,
+    hostToken
   });
 
   // Attach local or remote media stream to the <video> element
@@ -58,9 +59,14 @@ export const RoomPage: React.FC<RoomPageProps> = ({
       setIsVideoReady(false);
       video.srcObject = streamToPlay;
       video.muted = true;
-      video.play().catch((err) => {
-        console.warn('Autoplay prevented or interrupted:', err);
-      });
+      const p = video.play();
+      if (p !== undefined) {
+        p.then(() => {
+          setIsVideoReady(true);
+        }).catch((err) => {
+          console.warn('Autoplay prevented or interrupted:', err);
+        });
+      }
     } else {
       video.srcObject = null;
       setIsVideoReady(false);
@@ -163,30 +169,39 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   useEffect(() => {
     if (!socket) return;
 
-    // Join room event initialization
-    socket.emit(
-      'join-room',
-      { roomId, hostToken },
-      (response: {
-        success: boolean;
-        isHost?: boolean;
-        isSharing?: boolean;
-        isHostConnected?: boolean;
-        viewerCount?: number;
-        error?: string;
-      }) => {
-        if (response?.success) {
-          if (typeof response.isHost === 'boolean') {
-            setIsHost(response.isHost);
+    const joinCurrentRoom = () => {
+      socket.emit(
+        'join-room',
+        { roomId, hostToken },
+        (response: {
+          success: boolean;
+          isHost?: boolean;
+          isSharing?: boolean;
+          isHostConnected?: boolean;
+          viewerCount?: number;
+          error?: string;
+        }) => {
+          if (response?.success) {
+            if (typeof response.isHost === 'boolean') {
+              setIsHost(response.isHost);
+            }
+            if (typeof response.isHostConnected === 'boolean') {
+              setIsHostConnected(response.isHostConnected);
+            }
+            if (!response.isHost && response.isSharing) {
+              socket.emit('request-stream', { roomId });
+            }
+          } else {
+            setRoomEndedMessage(response?.error || 'Failed to join this room.');
           }
-          if (typeof response.isHostConnected === 'boolean') {
-            setIsHostConnected(response.isHostConnected);
-          }
-        } else {
-          setRoomEndedMessage(response?.error || 'Failed to join this room.');
         }
-      }
-    );
+      );
+    };
+
+    if (socket.connected) {
+      joinCurrentRoom();
+    }
+    socket.on('connect', joinCurrentRoom);
 
     // Room Ended
     const handleRoomEnded = ({ reason }: { reason: string }) => {
@@ -204,18 +219,32 @@ export const RoomPage: React.FC<RoomPageProps> = ({
       setIsHostConnected(true);
       setToastMessage('Host has reconnected.');
       setTimeout(() => setToastMessage(null), 3000);
+      if (!isHost) {
+        socket.emit('request-stream', { roomId });
+      }
+    };
+
+    // Host Started Sharing
+    const handleHostStartedSharing = () => {
+      setIsHostConnected(true);
+      if (!isHost) {
+        socket.emit('request-stream', { roomId });
+      }
     };
 
     socket.on('room-ended', handleRoomEnded);
     socket.on('host-disconnected', handleHostDisconnected);
     socket.on('host-reconnected', handleHostReconnected);
+    socket.on('host-started-sharing', handleHostStartedSharing);
 
     return () => {
+      socket.off('connect', joinCurrentRoom);
       socket.off('room-ended', handleRoomEnded);
       socket.off('host-disconnected', handleHostDisconnected);
       socket.off('host-reconnected', handleHostReconnected);
+      socket.off('host-started-sharing', handleHostStartedSharing);
     };
-  }, [socket, roomId, hostToken]);
+  }, [socket, roomId, hostToken, isHost]);
 
   // Host End Room
   const handleHostEndRoom = () => {
@@ -267,6 +296,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
               onLoadedMetadata={() => setIsVideoReady(true)}
               onLoadedData={() => setIsVideoReady(true)}
               onPlaying={() => setIsVideoReady(true)}
+              onCanPlay={() => setIsVideoReady(true)}
               className={`w-full h-full transition-opacity duration-200 ${
                 isVideoReady ? 'opacity-100' : 'opacity-0'
               } ${fitMode === 'cover' ? 'object-cover' : 'object-contain'}`}
