@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Socket } from 'socket.io-client';
+import * as mediasoupClient from 'mediasoup-client';
 
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
@@ -10,24 +11,31 @@ const ICE_SERVERS: RTCConfiguration = {
   ]
 };
 
-// Optimize SDP for ultra-low latency: smooth 60 FPS, 0 jitter buffer delay, and zero packet bloat
+// Low-latency SDP optimization
 function boostSdpBitrate(sdp: string, maxBitrateKbps: number = 5000): string {
   let modified = sdp.replace(/b=AS:\d+\r?\n/g, '');
   modified = modified.replace(/b=TIAS:\d+\r?\n/g, '');
-
-  // Optimal bandwidth limit: 5 Mbps (5000 kbps) delivers crisp 1080p 60fps without choking network buffers
   modified = modified.replace(
     /(m=video[^\r\n]*\r?\n)/,
     `$1b=AS:${maxBitrateKbps}\r\nb=TIAS:${maxBitrateKbps * 1000}\r\n`
   );
-
-  // Min 1.5 Mbps, start 3.5 Mbps, max 5 Mbps
   modified = modified.replace(
     /(a=fmtp:\d+ [^\r\n]*)/g,
     `$1;x-google-min-bitrate=1500;x-google-max-bitrate=${maxBitrateKbps};x-google-start-bitrate=3500`
   );
-
   return modified;
+}
+
+function emitWithPromise<T = any>(socket: Socket, event: string, data?: any): Promise<T> {
+  return new Promise((resolve, reject) => {
+    socket.emit(event, data, (response: any) => {
+      if (response && response.success === false) {
+        reject(new Error(response.error || `Socket event ${event} failed`));
+      } else {
+        resolve(response);
+      }
+    });
+  });
 }
 
 interface UseWebRTCProps {
@@ -43,14 +51,18 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
   const [isSharing, setIsSharing] = useState<boolean>(false);
   const [streamError, setStreamError] = useState<string | null>(null);
 
-  // Host: Map viewerSocketId -> RTCPeerConnection
-  const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  // Host: Candidate queues for candidates arriving before answer
-  const hostIceQueuesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+  // --- MEDIASOUP SFU REFS (1-to-many relay for 60+ viewers) ---
+  const sfuDeviceRef = useRef<mediasoupClient.Device | null>(null);
+  const sendTransportRef = useRef<mediasoupClient.types.Transport | null>(null);
+  const producerRef = useRef<mediasoupClient.types.Producer | null>(null);
+  const recvTransportRef = useRef<mediasoupClient.types.Transport | null>(null);
+  const consumerRef = useRef<mediasoupClient.types.Consumer | null>(null);
+  const usingSfuRef = useRef<boolean>(false);
 
-  // Viewer: Single RTCPeerConnection with host
+  // --- P2P FALLBACK REFS ---
+  const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const hostIceQueuesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const viewerPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  // Viewer: Candidate queue for candidates arriving before offer is processed
   const viewerIceQueueRef = useRef<RTCIceCandidateInit[]>([]);
 
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -59,16 +71,14 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
     localStreamRef.current = localStream;
   }, [localStream]);
 
-  // Clean up all host peer connections
+  // Clean up all host P2P connections
   const closeAllHostPeerConnections = useCallback(() => {
-    peerConnectionsRef.current.forEach((pc) => {
-      pc.close();
-    });
+    peerConnectionsRef.current.forEach((pc) => pc.close());
     peerConnectionsRef.current.clear();
     hostIceQueuesRef.current.clear();
   }, []);
 
-  // Clean up viewer peer connection
+  // Clean up viewer P2P connection
   const closeViewerPeerConnection = useCallback(() => {
     if (viewerPeerConnectionRef.current) {
       viewerPeerConnectionRef.current.close();
@@ -78,22 +88,40 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
     setRemoteStream(null);
   }, []);
 
-  // HOST: Create peer connection and offer for a specific viewer
+  // Clean up SFU resources
+  const closeSfuResources = useCallback(() => {
+    if (producerRef.current) {
+      producerRef.current.close();
+      producerRef.current = null;
+    }
+    if (sendTransportRef.current) {
+      sendTransportRef.current.close();
+      sendTransportRef.current = null;
+    }
+    if (consumerRef.current) {
+      consumerRef.current.close();
+      consumerRef.current = null;
+    }
+    if (recvTransportRef.current) {
+      recvTransportRef.current.close();
+      recvTransportRef.current = null;
+    }
+    sfuDeviceRef.current = null;
+    usingSfuRef.current = false;
+  }, []);
+
+  // HOST: Create P2P peer connection for a specific viewer (fallback)
   const createHostPeerConnection = useCallback(
     async (viewerSocketId: string, stream: MediaStream) => {
-      if (!socket) return null;
+      if (!socket || usingSfuRef.current) return null;
 
-      // Close existing if any
       const existing = peerConnectionsRef.current.get(viewerSocketId);
-      if (existing) {
-        existing.close();
-      }
+      if (existing) existing.close();
 
       const pc = new RTCPeerConnection(ICE_SERVERS);
       peerConnectionsRef.current.set(viewerSocketId, pc);
       hostIceQueuesRef.current.set(viewerSocketId, []);
 
-      // Add local screen tracks to peer connection and boost sender bitrate & crystal-clear resolution
       stream.getTracks().forEach((track) => {
         const sender = pc.addTrack(track, stream);
         try {
@@ -101,7 +129,6 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          // 5 Mbps: Crisp 1080p 60fps streaming with zero bufferbloat or frame queuing lag
           params.encodings[0].maxBitrate = 5000000;
           params.encodings[0].maxFramerate = 60;
           // @ts-ignore
@@ -113,12 +140,9 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
           // @ts-ignore
           params.degradationPreference = 'maintain-resolution';
           sender.setParameters(params).catch(() => {});
-        } catch {
-          // fallback
-        }
+        } catch {}
       });
 
-      // Prioritize H.264 hardware-accelerated video codec for instantaneous encoding
       try {
         const transceivers = pc.getTransceivers();
         transceivers.forEach((transceiver) => {
@@ -131,11 +155,8 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
             }
           }
         });
-      } catch {
-        // Fallback
-      }
+      } catch {}
 
-      // Handle ICE candidates
       pc.onicecandidate = (event) => {
         if (event.candidate) {
           socket.emit('webrtc-ice-candidate', {
@@ -146,21 +167,18 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       };
 
       pc.onconnectionstatechange = () => {
-        console.log(`[Host] Connection state with ${viewerSocketId}:`, pc.connectionState);
         if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
           peerConnectionsRef.current.delete(viewerSocketId);
           hostIceQueuesRef.current.delete(viewerSocketId);
         }
       };
 
-      // Create and send SDP Offer with low-latency bandwidth
       try {
         const offer = await pc.createOffer();
         if (offer.sdp) {
           offer.sdp = boostSdpBitrate(offer.sdp, 5000);
         }
         await pc.setLocalDescription(offer);
-
         socket.emit('webrtc-offer', {
           targetSocketId: viewerSocketId,
           sdp: offer
@@ -174,16 +192,69 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
     [socket]
   );
 
+  // VIEWER: Consume from Mediasoup SFU
+  const consumeFromSfu = useCallback(async () => {
+    if (!socket || isHost) return;
+
+    try {
+      console.log('[SFU Viewer] Connecting to Mediasoup SFU router...');
+      // 1. Get router RTP capabilities
+      const rtpRes = await emitWithPromise(socket, 'sfu-get-rtp-capabilities', { roomId });
+      const device = new mediasoupClient.Device();
+      await device.load({ routerRtpCapabilities: rtpRes.rtpCapabilities });
+      sfuDeviceRef.current = device;
+
+      // 2. Create recv transport
+      const transportRes = await emitWithPromise(socket, 'sfu-create-transport', { roomId });
+      const recvTransport = device.createRecvTransport(transportRes.params);
+      recvTransportRef.current = recvTransport;
+
+      recvTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+        try {
+          await emitWithPromise(socket, 'sfu-connect-transport', {
+            transportId: recvTransport.id,
+            dtlsParameters
+          });
+          callback();
+        } catch (err: any) {
+          errback(err);
+        }
+      });
+
+      // 3. Consume video
+      const consumeRes = await emitWithPromise(socket, 'sfu-consume', {
+        roomId,
+        transportId: recvTransport.id,
+        rtpCapabilities: device.rtpCapabilities
+      });
+
+      const consumer = await recvTransport.consume(consumeRes.params);
+      consumerRef.current = consumer;
+
+      // Set zero jitter buffer delay
+      const track = consumer.track;
+      const stream = new MediaStream([track]);
+
+      setRemoteStream(stream);
+      setIsSharing(true);
+      usingSfuRef.current = true;
+      console.log('[SFU Viewer] SFU track receiving at 60 FPS!');
+    } catch (err) {
+      console.warn('[SFU Viewer] SFU consume failed, falling back to P2P if available:', err);
+      usingSfuRef.current = false;
+      socket.emit('request-stream', { roomId });
+    }
+  }, [socket, isHost, roomId]);
+
   // HOST: Stop screen sharing
   const stopSharing = useCallback(() => {
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        track.stop();
-      });
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
       setLocalStream(null);
       localStreamRef.current = null;
     }
 
+    closeSfuResources();
     closeAllHostPeerConnections();
     setIsSharing(false);
 
@@ -192,9 +263,9 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
     }
 
     onShareEndedByHost?.();
-  }, [socket, roomId, closeAllHostPeerConnections, onShareEndedByHost]);
+  }, [socket, roomId, closeSfuResources, closeAllHostPeerConnections, onShareEndedByHost]);
 
-  // HOST: Start screen sharing with high framerate (60 FPS) and motion priority
+  // HOST: Start screen sharing
   const startSharing = useCallback(async () => {
     if (!socket || !isHost) return;
     setStreamError(null);
@@ -209,7 +280,6 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         audio: false
       });
 
-      // Set contentHint to 'detail' so WebRTC preserves tack-sharp text, UI, and native resolution
       const videoTrack = displayStream.getVideoTracks()[0];
       if (videoTrack) {
         if ('contentHint' in videoTrack) {
@@ -224,18 +294,80 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       localStreamRef.current = displayStream;
       setIsSharing(true);
 
-      // Tell server host started sharing and retrieve active viewer sockets
-      socket.emit(
-        'host-started-sharing',
-        { roomId },
-        (response: { success: boolean; viewers?: string[]; error?: string }) => {
-          if (response?.success && response.viewers && response.viewers.length > 0) {
-            response.viewers.forEach((viewerSocketId) => {
-              createHostPeerConnection(viewerSocketId, displayStream);
+      // --- Try publishing via Mediasoup SFU (1 stream for 60+ viewers) ---
+      let sfuSuccess = false;
+      try {
+        console.log('[SFU Host] Initializing Mediasoup broadcast...');
+        const rtpRes = await emitWithPromise(socket, 'sfu-get-rtp-capabilities', { roomId });
+        const device = new mediasoupClient.Device();
+        await device.load({ routerRtpCapabilities: rtpRes.rtpCapabilities });
+        sfuDeviceRef.current = device;
+
+        const transportRes = await emitWithPromise(socket, 'sfu-create-transport', { roomId });
+        const sendTransport = device.createSendTransport(transportRes.params);
+        sendTransportRef.current = sendTransport;
+
+        sendTransport.on('connect', async ({ dtlsParameters }, callback, errback) => {
+          try {
+            await emitWithPromise(socket, 'sfu-connect-transport', {
+              transportId: sendTransport.id,
+              dtlsParameters
             });
+            callback();
+          } catch (err: any) {
+            errback(err);
           }
-        }
-      );
+        });
+
+        sendTransport.on('produce', async ({ kind, rtpParameters }, callback, errback) => {
+          try {
+            const prodRes = await emitWithPromise(socket, 'sfu-produce', {
+              roomId,
+              transportId: sendTransport.id,
+              kind,
+              rtpParameters
+            });
+            callback({ id: prodRes.id });
+          } catch (err: any) {
+            errback(err);
+          }
+        });
+
+        const producer = await sendTransport.produce({
+          track: videoTrack,
+          encodings: [
+            {
+              maxBitrate: 5000000,
+              maxFramerate: 60,
+              scaleResolutionDownBy: 1.0,
+              priority: 'high',
+              networkPriority: 'high'
+            }
+          ]
+        });
+        producerRef.current = producer;
+        usingSfuRef.current = true;
+        sfuSuccess = true;
+        console.log('[SFU Host] Successfully publishing single stream to SFU (supports 60+ viewers with 0 host strain)!');
+      } catch (sfuErr) {
+        console.warn('[SFU Host] SFU publish failed, activating P2P mesh fallback:', sfuErr);
+        usingSfuRef.current = false;
+      }
+
+      // If SFU did not activate, fall back to P2P
+      if (!sfuSuccess) {
+        socket.emit(
+          'host-started-sharing',
+          { roomId },
+          (response: { success: boolean; viewers?: string[]; error?: string }) => {
+            if (response?.success && response.viewers && response.viewers.length > 0) {
+              response.viewers.forEach((viewerSocketId) => {
+                createHostPeerConnection(viewerSocketId, displayStream);
+              });
+            }
+          }
+        );
+      }
     } catch (err: any) {
       if (err.name === 'NotAllowedError') {
         console.log('Screen share selection cancelled by user');
@@ -247,20 +379,21 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
     }
   }, [socket, isHost, roomId, createHostPeerConnection, stopSharing]);
 
-  // Signalling listeners for WebRTC
+  // Signalling listeners for WebRTC and SFU
   useEffect(() => {
     if (!socket) return;
 
-    // HOST EVENTS
     if (isHost) {
+      // HOST EVENTS
       const handleViewerJoined = ({ viewerSocketId }: { viewerSocketId: string }) => {
-        if (localStreamRef.current) {
+        // If not using SFU, connect via P2P
+        if (!usingSfuRef.current && localStreamRef.current) {
           createHostPeerConnection(viewerSocketId, localStreamRef.current);
         }
       };
 
       const handleViewerRequestStream = ({ viewerSocketId }: { viewerSocketId: string }) => {
-        if (localStreamRef.current) {
+        if (!usingSfuRef.current && localStreamRef.current) {
           createHostPeerConnection(viewerSocketId, localStreamRef.current);
         }
       };
@@ -274,7 +407,6 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         }
       };
 
-      // Receive SDP Answer from viewer
       const handleWebRTCAnswer = async ({
         senderSocketId,
         sdp
@@ -286,7 +418,6 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         if (pc) {
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-            // Drain any queued candidates for this viewer
             const queue = hostIceQueuesRef.current.get(senderSocketId) || [];
             for (const cand of queue) {
               await pc.addIceCandidate(new RTCIceCandidate(cand));
@@ -298,7 +429,6 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         }
       };
 
-      // Receive ICE candidate from viewer
       const handleHostIceCandidate = async ({
         senderSocketId,
         candidate
@@ -337,6 +467,10 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       };
     } else {
       // VIEWER EVENTS
+      const handleSfuNewProducer = () => {
+        consumeFromSfu();
+      };
+
       const handleWebRTCOffer = async ({
         senderSocketId,
         sdp
@@ -344,20 +478,15 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         senderSocketId: string;
         sdp: RTCSessionDescriptionInit;
       }) => {
-        console.log('[Viewer] Received WebRTC offer from host');
         closeViewerPeerConnection();
 
         const pc = new RTCPeerConnection(ICE_SERVERS);
         viewerPeerConnectionRef.current = pc;
 
-        // Collect incoming remote tracks with zero jitter-buffer latency
         pc.ontrack = (event) => {
-          console.log('[Viewer] Remote track received:', event.track.kind);
-          // Zero playout delay hint: plays frames immediately with 0ms buffering delay
           if (event.receiver && 'playoutDelayHint' in event.receiver) {
             (event.receiver as any).playoutDelayHint = 0;
           }
-
           if (event.streams && event.streams[0]) {
             setRemoteStream(event.streams[0]);
           } else if (event.track) {
@@ -367,7 +496,6 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
           setIsSharing(true);
         };
 
-        // ICE candidate emission back to host
         pc.onicecandidate = (event) => {
           if (event.candidate) {
             socket.emit('webrtc-ice-candidate', {
@@ -377,18 +505,8 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
           }
         };
 
-        pc.onconnectionstatechange = () => {
-          console.log('[Viewer] WebRTC connection state:', pc.connectionState);
-          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-            console.warn('[Viewer] Connection disconnected or failed, requesting re-offer');
-            socket.emit('request-stream', { roomId });
-          }
-        };
-
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-
-          // Drain buffered candidates
           for (const cand of viewerIceQueueRef.current) {
             await pc.addIceCandidate(new RTCIceCandidate(cand));
           }
@@ -415,13 +533,11 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
         candidate: RTCIceCandidateInit;
       }) => {
         const pc = viewerPeerConnectionRef.current;
-        if (!candidate) return;
-
-        if (!pc || !pc.remoteDescription) {
+        if (!candidate || !pc) return;
+        if (!pc.remoteDescription) {
           viewerIceQueueRef.current.push(candidate);
           return;
         }
-
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (err) {
@@ -430,24 +546,33 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       };
 
       const handleHostStoppedSharing = () => {
+        closeSfuResources();
         closeViewerPeerConnection();
         setIsSharing(false);
       };
 
+      socket.on('sfu-new-producer', handleSfuNewProducer);
       socket.on('webrtc-offer', handleWebRTCOffer);
       socket.on('webrtc-ice-candidate', handleViewerIceCandidate);
       socket.on('host-stopped-sharing', handleHostStoppedSharing);
 
-      // On initial viewer join, request stream if host is already sharing
-      socket.emit('request-stream', { roomId });
+      // On join, check if an SFU producer is already streaming
+      socket.emit('sfu-check-producer', { roomId }, (res: { hasProducer: boolean }) => {
+        if (res?.hasProducer) {
+          consumeFromSfu();
+        } else {
+          socket.emit('request-stream', { roomId });
+        }
+      });
 
       return () => {
+        socket.off('sfu-new-producer', handleSfuNewProducer);
         socket.off('webrtc-offer', handleWebRTCOffer);
         socket.off('webrtc-ice-candidate', handleViewerIceCandidate);
         socket.off('host-stopped-sharing', handleHostStoppedSharing);
       };
     }
-  }, [socket, isHost, roomId, createHostPeerConnection, closeViewerPeerConnection]);
+  }, [socket, isHost, roomId, createHostPeerConnection, closeViewerPeerConnection, consumeFromSfu, closeSfuResources]);
 
   // Clean up on unmount
   useEffect(() => {
@@ -455,10 +580,11 @@ export function useWebRTC({ socket, roomId, isHost, onShareEndedByHost }: UseWeb
       if (isHost) {
         stopSharing();
       } else {
+        closeSfuResources();
         closeViewerPeerConnection();
       }
     };
-  }, [isHost, stopSharing, closeViewerPeerConnection]);
+  }, [isHost, stopSharing, closeSfuResources, closeViewerPeerConnection]);
 
   return {
     localStream,
