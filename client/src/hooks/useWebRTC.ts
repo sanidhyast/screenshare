@@ -3,14 +3,18 @@ import { Socket } from 'socket.io-client';
 
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' }
-  ]
+    {
+      urls: [
+        'stun:stun.l.google.com:19302',
+        'stun:stun1.l.google.com:19302',
+        'stun:stun2.l.google.com:19302'
+      ]
+    }
+  ],
+  iceCandidatePoolSize: 10
 };
 
-// Optimize SDP for ultra-low latency: smooth 60 FPS, 0 jitter buffer delay, and zero packet bloat
+// Optimize SDP for ultra-low latency: smooth 60 FPS, 0 jitter buffer delay, and instant keyframes
 function boostSdpBitrate(sdp: string, maxBitrateKbps: number = 5000): string {
   let modified = sdp.replace(/b=AS:\d+\r?\n/g, '');
   modified = modified.replace(/b=TIAS:\d+\r?\n/g, '');
@@ -26,6 +30,14 @@ function boostSdpBitrate(sdp: string, maxBitrateKbps: number = 5000): string {
     /(a=fmtp:\d+ [^\r\n]*)/g,
     `$1;x-google-min-bitrate=1500;x-google-max-bitrate=${maxBitrateKbps};x-google-start-bitrate=3500`
   );
+
+  // Force immediate Picture Loss Indication (PLI) and FIR keyframe requests so video renders instantly
+  if (!modified.includes('a=rtcp-fb:* nack pli') && !modified.includes('a=rtcp-fb:101 nack pli')) {
+    modified = modified.replace(
+      /(a=rtpmap:\d+ [^\r\n]*\r?\n)/g,
+      `$1a=rtcp-fb:* nack pli\r\na=rtcp-fb:* ccm fir\r\n`
+    );
+  }
 
   return modified;
 }

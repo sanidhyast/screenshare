@@ -28,6 +28,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [fitMode, setFitMode] = useState<'contain' | 'cover'>('contain');
+  const [isVideoReady, setIsVideoReady] = useState<boolean>(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -54,6 +55,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
     const streamToPlay = isHost ? localStream : remoteStream;
 
     if (streamToPlay) {
+      setIsVideoReady(false);
       video.srcObject = streamToPlay;
       video.muted = true;
       video.play().catch((err) => {
@@ -61,6 +63,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
       });
     } else {
       video.srcObject = null;
+      setIsVideoReady(false);
     }
   }, [isHost, localStream, remoteStream]);
 
@@ -261,13 +264,25 @@ export const RoomPage: React.FC<RoomPageProps> = ({
               // @ts-ignore
               webkit-playsinline="true"
               muted
-              onLoadedMetadata={(e) => {
-                e.currentTarget.play().catch(() => {});
-              }}
-              className={`w-full h-full transition-all duration-150 ${
-                fitMode === 'cover' ? 'object-cover' : 'object-contain'
-              }`}
+              onLoadedMetadata={() => setIsVideoReady(true)}
+              onLoadedData={() => setIsVideoReady(true)}
+              onPlaying={() => setIsVideoReady(true)}
+              className={`w-full h-full transition-opacity duration-200 ${
+                isVideoReady ? 'opacity-100' : 'opacity-0'
+              } ${fitMode === 'cover' ? 'object-cover' : 'object-contain'}`}
             />
+
+            {/* Seamless connecting animation until first frame is rendered */}
+            {!isVideoReady && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-background z-20">
+                <div className="w-12 h-12 rounded-2xl bg-surface border border-surface-border flex items-center justify-center shadow-xl relative mb-3">
+                  <span className="w-3 h-3 rounded-full bg-accent animate-ping" />
+                </div>
+                <p className="text-xs sm:text-sm text-content-secondary font-medium tracking-wide">
+                  Connecting live stream...
+                </p>
+              </div>
+            )}
           </div>
         ) : (
           <WaitingPlaceholder
