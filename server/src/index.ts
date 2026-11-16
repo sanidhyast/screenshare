@@ -6,7 +6,6 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { RoomManager } from './roomManager';
-import { SFUManager } from './sfuManager';
 
 dotenv.config();
 
@@ -43,7 +42,6 @@ const io = new Server(server, {
 });
 
 const roomManager = new RoomManager();
-const sfuManager = new SFUManager();
 
 io.on('connection', (socket: Socket) => {
   const clientIp = socket.handshake.address || socket.conn.remoteAddress || 'unknown';
@@ -166,91 +164,7 @@ io.on('connection', (socket: Socket) => {
     if (!room || room.hostSocketId !== socket.id) return;
 
     roomManager.setScreenSharing(cleanId, false);
-    sfuManager.closeProducer(cleanId);
     socket.to(cleanId).emit('host-stopped-sharing');
-  });
-
-  // --- MEDIASOUP SFU ENDPOINTS (1-to-Many Video Relay for 60+ Viewers) ---
-  socket.on('sfu-get-rtp-capabilities', async ({ roomId }: { roomId: string }, callback) => {
-    try {
-      const cleanId = roomId?.toLowerCase().trim();
-      const rtpCapabilities = await sfuManager.getRtpCapabilities(cleanId);
-      callback?.({ success: true, rtpCapabilities });
-    } catch (err: any) {
-      callback?.({ success: false, error: err.message });
-    }
-  });
-
-  socket.on('sfu-create-transport', async ({ roomId }: { roomId: string }, callback) => {
-    try {
-      const cleanId = roomId?.toLowerCase().trim();
-      const params = await sfuManager.createTransport(cleanId, socket.id);
-      callback?.({ success: true, params });
-    } catch (err: any) {
-      callback?.({ success: false, error: err.message });
-    }
-  });
-
-  socket.on('sfu-connect-transport', async ({ transportId, dtlsParameters }: { transportId: string; dtlsParameters: any }, callback) => {
-    try {
-      await sfuManager.connectTransport(transportId, dtlsParameters);
-      callback?.({ success: true });
-    } catch (err: any) {
-      callback?.({ success: false, error: err.message });
-    }
-  });
-
-  socket.on('sfu-produce', async ({
-    roomId,
-    transportId,
-    kind,
-    rtpParameters
-  }: {
-    roomId: string;
-    transportId: string;
-    kind: any;
-    rtpParameters: any;
-  }, callback) => {
-    try {
-      const cleanId = roomId?.toLowerCase().trim();
-      const room = roomManager.getRoom(cleanId);
-      if (!room || room.hostSocketId !== socket.id) {
-        return callback?.({ success: false, error: 'Unauthorized. Only host can produce stream.' });
-      }
-
-      const result = await sfuManager.produce(cleanId, transportId, kind, rtpParameters);
-      roomManager.setScreenSharing(cleanId, true);
-
-      // Broadcast to all viewers in the room that the SFU video feed is ready
-      socket.to(cleanId).emit('sfu-new-producer');
-      callback?.({ success: true, id: result.id });
-    } catch (err: any) {
-      callback?.({ success: false, error: err.message });
-    }
-  });
-
-  socket.on('sfu-check-producer', ({ roomId }: { roomId: string }, callback) => {
-    const cleanId = roomId?.toLowerCase().trim();
-    const hasProd = sfuManager.hasProducer(cleanId);
-    callback?.({ hasProducer: hasProd });
-  });
-
-  socket.on('sfu-consume', async ({
-    roomId,
-    transportId,
-    rtpCapabilities
-  }: {
-    roomId: string;
-    transportId: string;
-    rtpCapabilities: any;
-  }, callback) => {
-    try {
-      const cleanId = roomId?.toLowerCase().trim();
-      const params = await sfuManager.consume(cleanId, transportId, rtpCapabilities);
-      callback?.({ success: true, params });
-    } catch (err: any) {
-      callback?.({ success: false, error: err.message });
-    }
   });
 
   // Viewer requests stream from host (e.g. on page refresh or after re-connecting)
@@ -339,13 +253,11 @@ io.on('connection', (socket: Socket) => {
 
     io.to(cleanId).emit('room-ended', { reason: 'The host has ended this room session.' });
     roomManager.endRoom(cleanId);
-    sfuManager.closeRoom(cleanId);
     callback?.({ success: true });
   });
 
   // 8. Disconnection Handling
   socket.on('disconnect', () => {
-    sfuManager.closeSocket(socket.id);
     const result = roomManager.removeSocket(socket.id);
     if (!result.roomId) return;
 
@@ -364,7 +276,6 @@ io.on('connection', (socket: Socket) => {
         if (room && room.hostDisconnectedAt !== null) {
           io.to(roomId).emit('room-ended', { reason: 'The host has left and the session has ended.' });
           roomManager.endRoom(roomId);
-          sfuManager.closeRoom(roomId);
         }
       }, 45000);
     } else {
@@ -388,14 +299,6 @@ app.get('*', (_req, res) => {
   });
 });
 
-// Initialize SFU Media Worker and Start Server
-sfuManager.init().then(() => {
-  server.listen(PORT, () => {
-    console.log(`[Server] Minimal Screen Sharing backend (with SFU Media Relay) listening on port ${PORT}`);
-  });
-}).catch((err) => {
-  console.error('[Server] SFU initialization failed, starting fallback signaling server:', err);
-  server.listen(PORT, () => {
-    console.log(`[Server] Minimal Screen Sharing backend listening on port ${PORT}`);
-  });
+server.listen(PORT, () => {
+  console.log(`[Server] Minimal Screen Sharing backend listening on port ${PORT}`);
 });
