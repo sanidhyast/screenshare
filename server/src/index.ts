@@ -5,9 +5,46 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import { AccessToken } from 'livekit-server-sdk';
 import { RoomManager } from './roomManager';
 
 dotenv.config();
+
+const LIVEKIT_URL = process.env.LIVEKIT_URL;
+const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY;
+const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET;
+
+const hasLiveKitConfig = Boolean(LIVEKIT_URL && LIVEKIT_API_KEY && LIVEKIT_API_SECRET);
+
+if (hasLiveKitConfig) {
+  console.log('[LiveKit] Cloud Broadcast SFU enabled for 50+ students');
+} else {
+  console.log('[WebRTC] Direct P2P mode active (set LIVEKIT_* in .env for 50+ students cloud broadcast)');
+}
+
+async function generateLiveKitToken(roomId: string, identity: string, isHost: boolean): Promise<{ url: string; token: string } | null> {
+  if (!hasLiveKitConfig || !LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
+    return null;
+  }
+  try {
+    const at = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
+      identity,
+      ttl: '12h'
+    });
+    at.addGrant({
+      room: roomId,
+      roomJoin: true,
+      canPublish: isHost,
+      canSubscribe: true,
+      canPublishData: true
+    });
+    const token = await at.toJwt();
+    return { url: LIVEKIT_URL, token };
+  } catch (err) {
+    console.error('Failed to generate LiveKit token:', err);
+    return null;
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -82,7 +119,7 @@ io.on('connection', (socket: Socket) => {
   });
 
   // 3. Join Room
-  socket.on('join-room', ({ roomId, hostToken }: { roomId: string; hostToken?: string }, callback) => {
+  socket.on('join-room', async ({ roomId, hostToken }: { roomId: string; hostToken?: string }, callback) => {
     if (!roomManager.checkRateLimit(clientIp, 30, 60000)) {
       return callback?.({ success: false, error: 'Rate limit exceeded. Please wait a moment.' });
     }
@@ -104,12 +141,14 @@ io.on('connection', (socket: Socket) => {
       if (reclaimed) {
         socket.join(cleanId);
         socket.to(cleanId).emit('host-reconnected');
+        const livekit = await generateLiveKitToken(cleanId, socket.id, true);
         return callback?.({
           success: true,
           isHost: true,
           isSharing: room.isSharing,
           viewerCount: room.viewers.size,
-          existingViewers: Array.from(room.viewers.keys())
+          existingViewers: Array.from(room.viewers.keys()),
+          livekit
         });
       }
     }
@@ -132,12 +171,15 @@ io.on('connection', (socket: Socket) => {
       });
     }
 
+    const livekit = await generateLiveKitToken(cleanId, socket.id, false);
+
     callback?.({
       success: true,
       isHost: false,
       isSharing: room.isSharing,
       isHostConnected: room.hostDisconnectedAt === null,
-      viewerCount: room.viewers.size
+      viewerCount: room.viewers.size,
+      livekit
     });
   });
 

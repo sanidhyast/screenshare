@@ -4,6 +4,7 @@ import { ConnectionStatus } from '../types';
 import { FloatingToolbar } from '../components/FloatingToolbar';
 import { WaitingPlaceholder } from '../components/WaitingPlaceholder';
 import { useWebRTC } from '../hooks/useWebRTC';
+import { useLiveKit } from '../hooks/useLiveKit';
 import { AlertCircle, Home, LogOut } from 'lucide-react';
 
 interface RoomPageProps {
@@ -28,11 +29,25 @@ export const RoomPage: React.FC<RoomPageProps> = ({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [fitMode, setFitMode] = useState<'contain' | 'cover'>('contain');
+  const [livekitInfo, setLivekitInfo] = useState<{ url: string; token: string } | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // WebRTC hook
+  // Fallback direct P2P hook (active if LiveKit is not configured)
+  const webrtc = useWebRTC({
+    socket,
+    roomId,
+    isHost: isHost && !livekitInfo
+  });
+
+  // Cloud Broadcast hook (active if LiveKit is configured for 50+ students)
+  const livekit = useLiveKit({
+    livekitInfo,
+    isHost
+  });
+
+  const activeHook = livekitInfo ? livekit : webrtc;
   const {
     localStream,
     remoteStream,
@@ -40,11 +55,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
     streamError,
     startSharing,
     stopSharing
-  } = useWebRTC({
-    socket,
-    roomId,
-    isHost
-  });
+  } = activeHook;
 
   // Attach local or remote media stream to the <video> element
   useEffect(() => {
@@ -171,6 +182,7 @@ export const RoomPage: React.FC<RoomPageProps> = ({
         isHostConnected?: boolean;
         viewerCount?: number;
         error?: string;
+        livekit?: { url: string; token: string } | null;
       }) => {
         if (response?.success) {
           if (typeof response.isHost === 'boolean') {
@@ -178,6 +190,9 @@ export const RoomPage: React.FC<RoomPageProps> = ({
           }
           if (typeof response.isHostConnected === 'boolean') {
             setIsHostConnected(response.isHostConnected);
+          }
+          if (response.livekit) {
+            setLivekitInfo(response.livekit);
           }
         } else {
           setRoomEndedMessage(response?.error || 'Failed to join this room.');
